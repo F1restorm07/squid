@@ -1,9 +1,9 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
-use no_std_net::{ Ipv4Addr, Ipv6Addr };
-use bytes::{ Bytes, BytesMut, Buf, BufMut };
-use percent_encoding::{ CONTROLS, AsciiSet, utf8_percent_encode };
+// use no_std_net::{ Ipv4Addr, Ipv6Addr };
+use bytes::{ Bytes, BytesMut, BufMut };
+use percent_encoding::{ CONTROLS, AsciiSet, utf8_percent_encode, percent_decode };
 
 const FRAGMENT_ENCODE: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`');
 const QUERY_ENCODE: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'#');
@@ -26,34 +26,6 @@ impl From<&str> for Url {
         parse_url(value).unwrap()
     }
 }
-
-pub enum Scheme<'s> {
-    Http,
-    Https,
-    File,
-    Ftp,
-    Ws,
-    Wss,
-    Other(&'s str)
-}
-
-pub struct Authority<'a> {
-    user: &'a str,
-    password: &'a str,
-}
-
-pub struct Host<'h> {
-    name: Hostname<'h>,
-    domain: Option<&'h str>,
-}
-
-pub enum Hostname<'n> {
-    DnsDomain(&'n str),
-    IPv4(Ipv4Addr),
-    IPv6(Ipv6Addr),
-}
-
-pub struct Query<'q>(&'q str, &'q str);
 
 #[derive(Debug)]
 pub enum ParseError {
@@ -78,11 +50,31 @@ pub fn parse_url(input: &str) -> Result<Url, ParseError> {
                     }
                     buf.put_slice(b"://");
                     let userinfo_start = buf.len();
-                    let userinfo_end = parse_userinfo(&input[userinfo_start..], &mut buf).unwrap();
-                    let host_end = parse_host(&input[userinfo_end+1..], &mut buf).unwrap();
+                    let userinfo_end = parse_userinfo(input, &mut buf, scheme_end+3).unwrap();
+                    let host_end = parse_host(input, &mut buf, userinfo_end).unwrap();
+
+                    #[cfg(test)]
+                    println!("host_end: {host_end}, input_len: {}", input.len());
+
+                    if host_end >= input.len() {
+                        // TODO: adjust returned values for the percent encoded buffer (may add return args with adjusted buffer lengths)
+                        return Ok(Url {
+                            serialized: buf.freeze(), scheme_end, userinfo_end, host_end,
+                            path_end: host_end, query_end: host_end
+                        });
+                    }
                     // TODO: parse ports
-                    let path_end = parse_path(&input[host_end..], &mut buf).unwrap();
-                    let query_end = parse_query(&input[path_end..], &mut buf).unwrap();
+                    let path_end = parse_path(input, &mut buf, host_end).unwrap();
+
+                    if path_end >= input.len() {
+                        // TODO: adjust returned values for the percent encoded buffer (may add return args with adjusted buffer lengths)
+                        return Ok(Url {
+                            serialized: buf.freeze(), scheme_end, userinfo_end, host_end, path_end,
+                            query_end: path_end
+                        });
+                    }
+
+                    let query_end = parse_query(&input[path_end..], &mut buf, path_end).unwrap();
                     buf.extend(utf8_percent_encode(&input[query_end..], FRAGMENT_ENCODE).flat_map(|s| s.as_bytes()));
 
                     Ok(Url {
@@ -97,7 +89,7 @@ pub fn parse_url(input: &str) -> Result<Url, ParseError> {
                 _ => todo!()
             }
         },
-        _ => {todo!()} // TODO: fill this out
+        _ => todo!()
     }
 }
 
@@ -112,45 +104,52 @@ fn parse_scheme(input: &str, buf: &mut BytesMut) -> Result<usize, ()> {
     Ok(end)
 }
 
-fn parse_userinfo(input: &str, buf: &mut BytesMut) -> Result<usize, ()> {
-    let authority_end = input.find('@').unwrap_or(buf.len());
+fn parse_userinfo(input: &str, buf: &mut BytesMut, scheme_end: usize) -> Result<usize, ()> {
+    let userinfo_end = input[scheme_end..].find('@').unwrap_or(scheme_end);
 
-    let (username, password) = input[..authority_end].split_once(':').unwrap_or((&input[..authority_end], ""));
-    buf.extend(utf8_percent_encode(username, USERINFO_ENCODE).flat_map(|s| s.as_bytes()));
-    if !password.is_empty() {
-        buf.put_u8(b':');
-        buf.extend(utf8_percent_encode(password, USERINFO_ENCODE).flat_map(|s| s.as_bytes()));
+    let (username, password) = input[scheme_end..userinfo_end].split_once(':').unwrap_or(("", ""));
+
+    if !username.is_empty() {
+        buf.extend(utf8_percent_encode(username, USERINFO_ENCODE).flat_map(|s| s.as_bytes()));
+        if !password.is_empty() {
+            buf.put_u8(b':');
+            buf.extend(utf8_percent_encode(password, USERINFO_ENCODE).flat_map(|s| s.as_bytes()));
+        }
+        buf.put_u8(b'@');
     }
-    buf.put_u8(b'@');
-    Ok(authority_end) // ??: should i return the input's end or the buffer length (potentially much different)
+    Ok(userinfo_end)
 }
 
-fn parse_host(input: &str, buf: &mut BytesMut) -> Result<usize, ()> {
+fn parse_host(input: &str, buf: &mut BytesMut, userinfo_end: usize) -> Result<usize, ()> {
     // TODO: parse ipv6 + ipv4 addresses
     if input.starts_with(['/', '?', '#']) { return Err(()); } // return host-missing parse error here
-    let host_end = input.find(['/', '?', '#']).unwrap_or(buf.len());
-    buf.put_slice(input[..host_end].as_bytes());
+    let host_end = input[userinfo_end..].find(['/', '?', '#']).unwrap_or(input.len());
+
+    #[cfg(test)]
+    println!("idx: {host_end}, full: {input}");
+
+    buf.put_slice(input[userinfo_end..host_end].as_bytes());
     Ok(host_end)
 }
 
-fn parse_path(input: &str, buf: &mut BytesMut) -> Result<usize, ()> {
-    if input.starts_with(['?', '#']) { return Ok(buf.len()); }
-    let path_end = input.find(['?', '#']).unwrap_or(usize::MAX);
-    // ??: ^^ is there a better way to denote that the path is the last url component
-    let path_segments = input[1..path_end].split('/');
+fn parse_path(input: &str, buf: &mut BytesMut, host_end: usize) -> Result<usize, ()> {
+    if input.starts_with(['?', '#']) { return Ok(host_end); }
+    let path_end = input[host_end..].find(['?', '#']).unwrap_or(host_end);
+    let path_segments = input[host_end..path_end].split('/');
 
     for segment in path_segments {
-        buf.put_u8(b'/');
-        buf.extend(utf8_percent_encode(segment, PATH_ENCODE).flat_map(|s| s.as_bytes()));
+        if !segment.is_empty() {
+            buf.put_u8(b'/');
+            buf.extend(utf8_percent_encode(segment, PATH_ENCODE).flat_map(|s| s.as_bytes()));
+        }
     }
-
     Ok(path_end)
 }
 
-fn parse_query(input: &str, buf: &mut BytesMut) -> Result<usize, ()> {
-    let query_end = input.find('#').unwrap_or(usize::MAX);
-    buf.extend(utf8_percent_encode(&input[..query_end], SPECIAL_QUERY_ENCODE).flat_map(|s| s.as_bytes()));
-    Ok(query_end) // ??: may return Option<usize> to accomodate if find() returns None
+fn parse_query(input: &str, buf: &mut BytesMut, path_end: usize) -> Result<usize, ()> {
+    let query_end = input[path_end..].find('#').unwrap_or(path_end);
+    buf.extend(utf8_percent_encode(&input[path_end..query_end], SPECIAL_QUERY_ENCODE).flat_map(|s| s.as_bytes()));
+    Ok(query_end)
 }
 
 fn bytes_to_str(bytes: &[u8]) -> &str {
@@ -167,5 +166,34 @@ impl Url {
         } else {
             bytes_to_str(&self.serialized[self.scheme_end+1..self.host_end])
         }
+    }
+    pub fn as_str(&self) -> alloc::borrow::Cow<'_, str> {
+        let percent_decoded = percent_decode(&self.serialized).decode_utf8().unwrap();
+        percent_decoded
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // #[test]
+    // fn basic_parse_host() {
+    //     let host = "www.example.com";
+    //     let mut buf = BytesMut::with_capacity(host.len());
+    //     let _ = parse_host(host, &mut buf).unwrap();
+    //     assert_eq!(
+    //         host,
+    //         bytes_to_str(&buf[..])
+    //     )
+    // }
+    #[test]
+    fn basic_parse_url() {
+        let url = "http://www.example.com";
+        assert_eq!(url, parse_url(url).unwrap().as_str());
+    }
+    #[test]
+    fn path_parse_url() {
+        let url = "http://www.example.com/doc/glossary";
+        assert_eq!(url, parse_url(url).unwrap().as_str());
     }
 }
