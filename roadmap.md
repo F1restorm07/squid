@@ -1,21 +1,24 @@
 # Squid Roadmap
 
 ## 0.1.0
-- [ ] URL struct
-    - [ ] impl FromStr
-    - [ ] support special URL schemes
-- [ ] parsing functions
+- [X] Url struct
+    - [X] impl FromStr
+    - [X] (de)serializable
+    - [ ] print out indiviudal components
+- [X] parsing functions
 
 ## Features
 
 ## API
-- [ ] master URL struct
+- [X] master Url struct
     - contains every section of the url
-- [ ] parsing
+- [X] parsing
     - parse from &str into Url (FromStr)
-    - each url components parses separately, returning the parsed input and the rest of the input as output
-        - Ex: fn(&str) -> (<host>, &str)
+    - each url components parses separately
+    - [ ] parse individual components into Url struct
+    - [ ] support optional base Url
 
 ## Long-term goals
 - [ ] minimal allocations
 - [ ] minimal dependencies
+- [ ] no alloc crate
