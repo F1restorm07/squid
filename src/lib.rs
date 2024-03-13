@@ -49,41 +49,53 @@ pub fn parse_url(input: &str) -> Result<Url, ParseError> {
                         return Err(ParseError::SpecialSchemeMissingFollowingSolidus);
                     }
                     buf.put_slice(b"://");
-                    let userinfo_start = buf.len();
                     let userinfo_end = parse_userinfo(input, &mut buf, scheme_end+3).unwrap();
+                    let buf_userinfo_end = buf.len();
                     let host_end = parse_host(input, &mut buf, userinfo_end).unwrap();
-
-                    #[cfg(test)]
-                    println!("host_end: {host_end}, input_len: {}", input.len());
+                    let buf_host_end = buf.len();
 
                     if host_end >= input.len() {
                         // TODO: adjust returned values for the percent encoded buffer (may add return args with adjusted buffer lengths)
                         return Ok(Url {
-                            serialized: buf.freeze(), scheme_end, userinfo_end, host_end,
-                            path_end: host_end, query_end: host_end
+                            serialized: buf.freeze(), scheme_end,
+                            userinfo_end: buf_userinfo_end,
+                            host_end: buf_host_end,
+                            path_end: buf_host_end, query_end: buf_host_end
                         });
                     }
                     // TODO: parse ports
                     let path_end = parse_path(input, &mut buf, host_end).unwrap();
+                    let buf_path_end = buf.len();
 
                     if path_end >= input.len() {
                         // TODO: adjust returned values for the percent encoded buffer (may add return args with adjusted buffer lengths)
                         return Ok(Url {
-                            serialized: buf.freeze(), scheme_end, userinfo_end, host_end, path_end,
-                            query_end: path_end
+                            serialized: buf.freeze(), scheme_end,
+                            userinfo_end: buf_userinfo_end,
+                            host_end: buf_host_end,
+                            path_end: buf_path_end,
+                            query_end: buf_path_end
                         });
                     }
 
-                    let query_end = parse_query(&input[path_end..], &mut buf, path_end).unwrap();
-                    buf.extend(utf8_percent_encode(&input[query_end..], FRAGMENT_ENCODE).flat_map(|s| s.as_bytes()));
+                    let query_end = parse_query(input, &mut buf, path_end).unwrap();
+                    let buf_query_end = buf.len();
+
+                    if buf_query_end < input.len() {
+                        buf.extend(
+                        utf8_percent_encode(&input[query_end..], FRAGMENT_ENCODE)
+                            .flat_map(|s| s.as_bytes()
+                            )
+                        );
+                    }
 
                     Ok(Url {
                         serialized: buf.freeze(),
                         scheme_end,
-                        userinfo_end,
-                        host_end,
-                        path_end,
-                        query_end,
+                        userinfo_end: buf_userinfo_end,
+                        host_end: buf_host_end,
+                        path_end: buf_path_end,
+                        query_end: buf_query_end,
                     })
                 },
                 _ => todo!()
@@ -106,7 +118,6 @@ fn parse_scheme(input: &str, buf: &mut BytesMut) -> Result<usize, ()> {
 
 fn parse_userinfo(input: &str, buf: &mut BytesMut, scheme_end: usize) -> Result<usize, ()> {
     let userinfo_end = input[scheme_end..].find('@').unwrap_or(scheme_end);
-
     let (username, password) = input[scheme_end..userinfo_end].split_once(':').unwrap_or(("", ""));
 
     if !username.is_empty() {
@@ -117,37 +128,50 @@ fn parse_userinfo(input: &str, buf: &mut BytesMut, scheme_end: usize) -> Result<
         }
         buf.put_u8(b'@');
     }
+
     Ok(userinfo_end)
 }
 
 fn parse_host(input: &str, buf: &mut BytesMut, userinfo_end: usize) -> Result<usize, ()> {
     // TODO: parse ipv6 + ipv4 addresses
-    if input.starts_with(['/', '?', '#']) { return Err(()); } // return host-missing parse error here
-    let host_end = input[userinfo_end..].find(['/', '?', '#']).unwrap_or(input.len());
+    if input[userinfo_end..].starts_with(['/', '?', '#']) { return Err(()); } // return host-missing parse error here
 
-    #[cfg(test)]
-    println!("idx: {host_end}, full: {input}");
+    let host_end = match input[userinfo_end..].find(['/', '?', '#']) {
+        Some(b) => userinfo_end + b, None => input.len()
+    };
 
     buf.put_slice(input[userinfo_end..host_end].as_bytes());
     Ok(host_end)
 }
 
 fn parse_path(input: &str, buf: &mut BytesMut, host_end: usize) -> Result<usize, ()> {
-    if input.starts_with(['?', '#']) { return Ok(host_end); }
-    let path_end = input[host_end..].find(['?', '#']).unwrap_or(host_end);
+    if input[host_end..].starts_with(['?', '#']) { return Ok(host_end); }
+
+    let path_end = match input[host_end..].find(['?', '#']) {
+        Some(b) => host_end + b, None => input.len()
+    };
+    // adding one to host end here jumps over the initial slash, which removes the first match (empty segment)
     let path_segments = input[host_end..path_end].split('/');
 
     for segment in path_segments {
         if !segment.is_empty() {
-            buf.put_u8(b'/');
+            if !buf.ends_with(b"/") { buf.put_u8(b'/'); }
             buf.extend(utf8_percent_encode(segment, PATH_ENCODE).flat_map(|s| s.as_bytes()));
+        } else if !buf.ends_with(b"/") {
+            buf.put_u8(b'/');
+        } else {
+            continue;
         }
     }
     Ok(path_end)
 }
 
 fn parse_query(input: &str, buf: &mut BytesMut, path_end: usize) -> Result<usize, ()> {
-    let query_end = input[path_end..].find('#').unwrap_or(path_end);
+    if input[path_end..].starts_with('#') { return Ok(path_end); }
+
+    let query_end = match input[path_end..].find('#') {
+        Some(b) => path_end + b, None => input.len()
+    };
     buf.extend(utf8_percent_encode(&input[path_end..query_end], SPECIAL_QUERY_ENCODE).flat_map(|s| s.as_bytes()));
     Ok(query_end)
 }
@@ -176,16 +200,6 @@ impl Url {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // #[test]
-    // fn basic_parse_host() {
-    //     let host = "www.example.com";
-    //     let mut buf = BytesMut::with_capacity(host.len());
-    //     let _ = parse_host(host, &mut buf).unwrap();
-    //     assert_eq!(
-    //         host,
-    //         bytes_to_str(&buf[..])
-    //     )
-    // }
     #[test]
     fn basic_parse_url() {
         let url = "http://www.example.com";
@@ -194,6 +208,21 @@ mod tests {
     #[test]
     fn path_parse_url() {
         let url = "http://www.example.com/doc/glossary";
+        assert_eq!(url, parse_url(url).unwrap().as_str());
+    }
+    #[test]
+    fn path_and_query_parse_url() {
+        let url = "http://www.example.com/scripts/?job=111&task=1";
+        assert_eq!(url, parse_url(url).unwrap().as_str());
+    }
+    #[test]
+    fn single_slash_path_parse_url() {
+        let url = "http://www.example.com/";
+        assert_eq!(url, parse_url(url).unwrap().as_str());
+    }
+    #[test]
+    fn fragment_parse_url() {
+        let url = "http://www.example.com#introduction";
         assert_eq!(url, parse_url(url).unwrap().as_str());
     }
 }
