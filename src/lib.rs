@@ -27,6 +27,13 @@ impl From<&str> for Url {
     }
 }
 
+impl core::str::FromStr for Url {
+    type Err = ParseError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_url(s)
+    }
+}
+
 #[derive(Debug)]
 pub enum ParseError {
     SpecialSchemeMissingFollowingSolidus,
@@ -190,6 +197,21 @@ impl Url {
         } else {
             bytes_to_str(&self.serialized[self.scheme_end+1..self.host_end])
         }
+    }
+    pub fn host(&self) -> &str {
+        bytes_to_str(&self.serialized[self.userinfo_end..self.host_end])
+    }
+    pub fn path_and_query(&self) -> &str {
+        bytes_to_str(&self.serialized[self.host_end..self.query_end])
+    }
+    pub fn path(&self) -> &str {
+        bytes_to_str(&self.serialized[self.host_end..self.path_end])
+    }
+    pub fn query(&self) -> &str {
+        bytes_to_str(&self.serialized[self.path_end..self.query_end])
+    }
+    pub fn fragment(&self) -> &str {
+        bytes_to_str(&self.serialized[self.query_end..])
     }
     pub fn as_str(&self) -> alloc::borrow::Cow<'_, str> {
         let percent_decoded = percent_decode(&self.serialized).decode_utf8().unwrap();
